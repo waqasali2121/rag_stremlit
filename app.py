@@ -5,11 +5,11 @@ import numpy as np
 
 from groq import Groq
 from sentence_transformers import SentenceTransformer
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from textwrap import wrap
 
 
 # -----------------------------
-# Groq API
+# Groq API Setup
 # -----------------------------
 client = Groq(
     api_key=os.environ.get("GROQ_API_KEY")
@@ -17,7 +17,7 @@ client = Groq(
 
 
 # -----------------------------
-# Embedding Model
+# Load Embedding Model
 # -----------------------------
 @st.cache_resource
 def load_embedding_model():
@@ -30,7 +30,7 @@ embedding_model = load_embedding_model()
 
 
 # -----------------------------
-# Load Documents
+# Load Text Documents
 # -----------------------------
 def load_documents():
 
@@ -44,7 +44,7 @@ def load_documents():
 
         filepath = os.path.join(folder, filename)
 
-        if filename.endswith(".txt"):
+        if filename.lower().endswith(".txt"):
 
             with open(filepath, "r", encoding="utf-8") as file:
                 documents.append(file.read())
@@ -52,30 +52,28 @@ def load_documents():
     return documents
 
 
-
 # -----------------------------
-# Chunking
+# Simple Chunking
 # -----------------------------
 def create_chunks(documents):
-
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=100
-    )
 
     chunks = []
 
     for document in documents:
-        chunks.extend(
-            splitter.split_text(document)
+
+        document_chunks = wrap(
+            document,
+            width=500
         )
+
+        chunks.extend(document_chunks)
 
     return chunks
 
 
 
 # -----------------------------
-# FAISS Vector Database
+# Create FAISS Database
 # -----------------------------
 @st.cache_resource
 def create_faiss_database():
@@ -111,12 +109,12 @@ index, chunks = create_faiss_database()
 
 
 # -----------------------------
-# Retrieve Context
+# Retrieve Relevant Chunks
 # -----------------------------
 def retrieve_context(question, k=3):
 
     if index is None:
-        return "No documents found."
+        return "No documents available."
 
     query_vector = embedding_model.encode(
         [question]
@@ -132,6 +130,7 @@ def retrieve_context(question, k=3):
         k
     )
 
+
     context = []
 
     for item in results[0]:
@@ -141,28 +140,28 @@ def retrieve_context(question, k=3):
                 chunks[item]
             )
 
+
     return "\n\n".join(context)
 
 
 
 # -----------------------------
-# Groq Generation
+# Generate Answer using Groq
 # -----------------------------
 def generate_answer(question, context):
 
     prompt = f"""
-You are a RAG AI assistant.
+You are a RAG chatbot.
 
-Use only the context below to answer.
+Answer the question using only the provided context.
 
 Context:
 {context}
 
-User Question:
+Question:
 {question}
 
-If the answer is not present in the context,
-reply:
+If the answer is not found in the context, say:
 "I don't have enough information."
 """
 
@@ -174,7 +173,7 @@ reply:
         messages=[
             {
                 "role": "system",
-                "content": "Answer accurately using retrieved information."
+                "content": "You answer from retrieved documents."
             },
             {
                 "role": "user",
@@ -191,10 +190,10 @@ reply:
 
 
 # -----------------------------
-# Streamlit Interface
+# Streamlit UI
 # -----------------------------
 st.set_page_config(
-    page_title="Groq RAG Chatbot",
+    page_title="Groq FAISS RAG Chatbot",
     page_icon="🤖"
 )
 
@@ -203,8 +202,18 @@ st.title("🤖 Groq + FAISS RAG Chatbot")
 
 
 if not os.environ.get("GROQ_API_KEY"):
+
+    st.error(
+        "Missing GROQ_API_KEY. Add it in Streamlit Cloud Secrets."
+    )
+
+    st.stop()
+
+
+if not chunks:
+
     st.warning(
-        "Please add GROQ_API_KEY in Streamlit Secrets."
+        "No .txt files found. Add files inside the documents folder."
     )
 
 
@@ -221,9 +230,7 @@ if question:
 
     with st.spinner("Searching knowledge base..."):
 
-        context = retrieve_context(
-            question
-        )
+        context = retrieve_context(question)
 
         answer = generate_answer(
             question,
