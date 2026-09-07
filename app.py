@@ -5,11 +5,12 @@ import numpy as np
 
 from groq import Groq
 from sentence_transformers import SentenceTransformer
+from pypdf import PdfReader
 from textwrap import wrap
 
 
 # -----------------------------
-# Groq API Setup
+# Groq API
 # -----------------------------
 client = Groq(
     api_key=os.environ.get("GROQ_API_KEY")
@@ -17,7 +18,7 @@ client = Groq(
 
 
 # -----------------------------
-# Load Embedding Model
+# Embedding Model
 # -----------------------------
 @st.cache_resource
 def load_embedding_model():
@@ -30,103 +31,84 @@ embedding_model = load_embedding_model()
 
 
 # -----------------------------
-# Load Text Documents
+# Extract PDF Text
 # -----------------------------
-def load_documents():
+def extract_pdf_text(uploaded_file):
 
-    documents = []
-    folder = "documents"
+    reader = PdfReader(uploaded_file)
 
-    if not os.path.exists(folder):
-        return documents
+    text = ""
 
-    for filename in os.listdir(folder):
+    for page in reader.pages:
+        page_text = page.extract_text()
 
-        filepath = os.path.join(folder, filename)
+        if page_text:
+            text += page_text + "\n"
 
-        if filename.lower().endswith(".txt"):
+    return text
 
-            with open(filepath, "r", encoding="utf-8") as file:
-                documents.append(file.read())
-
-    return documents
 
 
 # -----------------------------
-# Simple Chunking
+# Chunking
 # -----------------------------
-def create_chunks(documents):
+def create_chunks(text):
 
-    chunks = []
-
-    for document in documents:
-
-        document_chunks = wrap(
-            document,
-            width=500
-        )
-
-        chunks.extend(document_chunks)
+    chunks = wrap(
+        text,
+        width=700
+    )
 
     return chunks
 
 
 
 # -----------------------------
-# Create FAISS Database
+# Create FAISS Index
 # -----------------------------
 @st.cache_resource
-def create_faiss_database():
+def create_vector_database(chunks):
 
-    documents = load_documents()
-
-    if not documents:
-        return None, []
-
-    chunks = create_chunks(documents)
-
-    vectors = embedding_model.encode(
+    embeddings = embedding_model.encode(
         chunks,
         show_progress_bar=False
     )
 
-    vectors = np.array(vectors).astype("float32")
+    embeddings = np.array(
+        embeddings
+    ).astype("float32")
 
-    dimension = vectors.shape[1]
+
+    dimension = embeddings.shape[1]
 
     index = faiss.IndexFlatL2(
         dimension
     )
 
-    index.add(vectors)
+    index.add(
+        embeddings
+    )
 
-    return index, chunks
-
-
-
-index, chunks = create_faiss_database()
+    return index
 
 
 
 # -----------------------------
-# Retrieve Relevant Chunks
+# Search PDF Knowledge
 # -----------------------------
-def retrieve_context(question, k=3):
+def search_context(index, chunks, question, k=4):
 
-    if index is None:
-        return "No documents available."
-
-    query_vector = embedding_model.encode(
+    query_embedding = embedding_model.encode(
         [question]
     )
 
-    query_vector = np.array(
-        query_vector
+    query_embedding = np.array(
+        query_embedding
     ).astype("float32")
 
 
     distances, results = index.search(
-        query_vector,
+        query_embedding,
         k
     )
 
@@ -146,23 +128,23 @@ def retrieve_context(question, k=3):
 
 
 # -----------------------------
-# Generate Answer using Groq
+# Groq Answer
 # -----------------------------
-def generate_answer(question, context):
+def ask_groq(question, context):
 
     prompt = f"""
-You are a RAG chatbot.
+You are a PDF RAG assistant.
 
-Answer the question using only the provided context.
+Answer the user's question only from the provided PDF context.
 
-Context:
+PDF Context:
 {context}
 
 Question:
 {question}
 
-If the answer is not found in the context, say:
-"I don't have enough information."
+If the information is not available in the PDF, say:
+"I could not find this information in the uploaded PDF."
 """
 
 
@@ -173,7 +155,7 @@ If the answer is not found in the context, say:
         messages=[
             {
                 "role": "system",
-                "content": "You answer from retrieved documents."
+                "content": "Answer using retrieved PDF information."
             },
             {
                 "role": "user",
@@ -190,53 +172,91 @@ If the answer is not found in the context, say:
 
 
 # -----------------------------
-# Streamlit UI
+# Streamlit App
 # -----------------------------
 st.set_page_config(
-    page_title="Groq FAISS RAG Chatbot",
-    page_icon="🤖"
+    page_title="PDF RAG Chatbot",
+    page_icon="📄"
 )
 
 
-st.title("🤖 Groq + FAISS RAG Chatbot")
+st.title("📄 Groq + FAISS PDF RAG Chatbot")
 
 
 if not os.environ.get("GROQ_API_KEY"):
 
     st.error(
-        "Missing GROQ_API_KEY. Add it in Streamlit Cloud Secrets."
+        "Please add GROQ_API_KEY in Streamlit Secrets."
     )
 
     st.stop()
 
 
-if not chunks:
-
-    st.warning(
-        "No .txt files found. Add files inside the documents folder."
-    )
-
-
-question = st.chat_input(
-    "Ask your question..."
+uploaded_pdf = st.file_uploader(
+    "Upload your PDF",
+    type=["pdf"]
 )
 
 
-if question:
+if uploaded_pdf:
 
-    with st.chat_message("user"):
-        st.write(question)
+    with st.spinner("Reading PDF and creating knowledge base..."):
 
-
-    with st.spinner("Searching knowledge base..."):
-
-        context = retrieve_context(question)
-
-        answer = generate_answer(
-            question,
-            context
+        pdf_text = extract_pdf_text(
+            uploaded_pdf
         )
 
+        if pdf_text.strip():
 
-    with st.chat_message("assistant"):
-        st.write(answer)
+            chunks = create_chunks(
+                pdf_text
+            )
+
+            index = create_vector_database(
+                chunks
+            )
+
+            st.success(
+                f"PDF processed successfully. {len(chunks)} chunks created."
+            )
+
+
+            question = st.chat_input(
+                "Ask anything about this PDF..."
+            )
+
+
+            if question:
+
+                with st.chat_message("user"):
+                    st.write(question)
+
+
+                with st.spinner("Searching PDF..."):
+
+                    context = search_context(
+                        index,
+                        chunks,
+                        question
+                    )
+
+                    answer = ask_groq(
+                        question,
+                        context
+                    )
+
+
+                with st.chat_message("assistant"):
+                    st.write(answer)
+
+        else:
+
+            st.warning(
+                "Could not extract text from this PDF."
+            )
+
+else:
+
+    st.info(
+        "Upload a PDF file to start chatting."
+    )
